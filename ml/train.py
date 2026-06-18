@@ -1,25 +1,26 @@
 import json
-from pathlib import Path
-
-import joblib
-import matplotlib
 import pandas as pd
+import joblib
 
+import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
+from pathlib import Path
+
+from sklearn.model_selection import train_test_split
 from sklearn.metrics import (
-    ConfusionMatrixDisplay,
     accuracy_score,
     classification_report,
     confusion_matrix,
-    f1_score,
-    precision_recall_curve,
+    ConfusionMatrixDisplay,
     precision_score,
     recall_score,
+    f1_score,
+    precision_recall_curve,
     roc_auc_score,
 )
-from sklearn.model_selection import train_test_split
+
 from xgboost import XGBClassifier
 
 
@@ -28,6 +29,7 @@ MODEL_FILE = Path("models/flare_model.pkl")
 CONFUSION_MATRIX_FILE = Path("models/confusion_matrix.png")
 FEATURE_IMPORTANCE_FILE = Path("models/feature_importance.png")
 THRESHOLD_FILE = Path("models/decision_threshold.json")
+TARGET_RECALL = 0.45
 
 PARAM_GRID = [
     {
@@ -78,19 +80,8 @@ PARAM_GRID = [
 ]
 
 
-def best_threshold_for_f1(y_true, probabilities):
-    precisions, recalls, thresholds = precision_recall_curve(
-        y_true,
-        probabilities,
-    )
-
-    f1_scores = 2 * (precisions * recalls) / (precisions + recalls + 1e-12)
-    best_index = f1_scores[:-1].argmax()
-
-    return float(thresholds[best_index]), float(f1_scores[best_index])
-
-
 def train():
+
     df = pd.read_csv(DATA_FILE)
 
     X = df.drop(columns=["target"])
@@ -118,9 +109,11 @@ def train():
     best_params = None
     best_threshold = 0.5
     best_val_f1 = -1.0
+    best_val_recall = 0.0
+    best_meets_target_recall = False
 
     for params in PARAM_GRID:
-        model = XGBClassifier(
+        candidate = XGBClassifier(
             **params,
             scale_pos_weight=pos_weight,
             random_state=42,
@@ -128,16 +121,49 @@ def train():
             n_jobs=1,
         )
 
-        model.fit(X_train, y_train)
+        candidate.fit(X_train, y_train)
 
-        val_probs = model.predict_proba(X_val)[:, 1]
-        threshold, val_f1 = best_threshold_for_f1(y_val, val_probs)
+        val_probs = candidate.predict_proba(X_val)[:, 1]
+        precisions, recalls, thresholds = precision_recall_curve(
+            y_val,
+            val_probs,
+        )
+        f1_scores = 2 * (precisions * recalls) / (
+            precisions + recalls + 1e-12
+        )
+        best_f1_index = f1_scores[:-1].argmax()
+        target_recall_indices = [
+            i
+            for i in range(len(thresholds))
+            if recalls[i] >= TARGET_RECALL
+        ]
 
-        if val_f1 > best_val_f1:
-            best_model = model
+        if target_recall_indices:
+            best_index = max(
+                target_recall_indices,
+                key=lambda i: f1_scores[i],
+            )
+            meets_target_recall = True
+        else:
+            best_index = best_f1_index
+            meets_target_recall = False
+
+        val_f1 = float(f1_scores[best_index])
+        val_recall = float(recalls[best_index])
+
+        if (
+            (meets_target_recall and not best_meets_target_recall)
+            or (
+                meets_target_recall == best_meets_target_recall
+                and val_f1 > best_val_f1
+            )
+        ):
+            best_model = candidate
             best_params = params
-            best_threshold = threshold
+            best_threshold = float(thresholds[best_index])
             best_val_f1 = val_f1
+            best_val_recall = val_recall
+            best_meets_target_recall = meets_target_recall
 
     model = best_model
 
@@ -146,13 +172,35 @@ def train():
 
     print("\n=== Metrics ===")
     print("Best Validation F1:", best_val_f1)
+    print("Best Validation Recall:", best_val_recall)
+    print("Target Recall Met:", best_meets_target_recall)
     print("Decision Threshold:", best_threshold)
     print("Best Parameters:", best_params)
-    print("Accuracy:", accuracy_score(y_test, preds))
-    print("Precision:", precision_score(y_test, preds))
-    print("Recall:", recall_score(y_test, preds))
-    print("F1:", f1_score(y_test, preds))
-    print("ROC-AUC:", roc_auc_score(y_test, probs))
+
+    print(
+        "Accuracy:",
+        accuracy_score(y_test, preds),
+    )
+
+    print(
+        "Precision:",
+        precision_score(y_test, preds),
+    )
+
+    print(
+        "Recall:",
+        recall_score(y_test, preds),
+    )
+
+    print(
+        "F1:",
+        f1_score(y_test, preds),
+    )
+
+    print(
+        "ROC-AUC:",
+        roc_auc_score(y_test, probs),
+    )
 
     print("\n=== Confusion Matrix ===")
     print(
@@ -168,7 +216,7 @@ def train():
 
     MODEL_FILE.parent.mkdir(
         parents=True,
-        exist_ok=True,
+        exist_ok=True
     )
 
     ConfusionMatrixDisplay.from_predictions(
@@ -206,7 +254,9 @@ def train():
             indent=2,
         )
 
-    print(f"\nModel saved -> {MODEL_FILE}")
+    print(
+        f"\nModel saved -> {MODEL_FILE}"
+    )
     print(f"Decision threshold saved -> {THRESHOLD_FILE}")
     print(f"Confusion matrix plot saved -> {CONFUSION_MATRIX_FILE}")
     print(f"Feature importance plot saved -> {FEATURE_IMPORTANCE_FILE}")
